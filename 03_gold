@@ -1,0 +1,58 @@
+## Notebook: Gold - Atualizacao Incremental
+
+from pyspark.sql.functions import year, month, col
+from pyspark.sql.utils import AnalysisException
+
+silverPath = "/FileStore/silver/clientes"
+goldPath = "/FileStore/gold/clientes"
+
+# Leitura Silver
+df_silver = spark.read.format("delta").load(silverPath)
+
+# Tenta ler Gold, ou cria DataFrame vazio se não existir
+try:
+    df_gold = spark.read.format("delta").load(goldPath)
+except AnalysisException:
+    from pyspark.sql.types import StructType, StructField, IntegerType, StringType, TimestampType
+    schema_gold = StructType(df_silver.schema.fields + [
+        StructField("ano", IntegerType(), True),
+        StructField("mes", IntegerType(), True)
+    ])
+    df_gold = spark.createDataFrame([], schema_gold)
+
+# Novos registros
+df_novos = df_silver.join(df_gold.select("id_cliente"), "id_cliente", "left_anti") \
+    .withColumn("ano", year("data_atualizacao")) \
+    .withColumn("mes", month("data_atualizacao"))
+
+# Atualizáveis
+df_atualizaveis = df_silver.alias("novo").join(
+    df_gold.alias("gold"),
+    "id_cliente"
+).filter("novo.data_atualizacao > gold.data_atualizacao")
+
+df_atualizaveis_sel = df_atualizaveis.select(
+    "id_cliente",
+    col("novo.nome").alias("nome"),
+    col("novo.email").alias("email"),
+    col("novo.data_atualizacao").alias("data_atualizacao"),
+    col("novo.pk_hash").alias("pk_hash"),
+    col("novo.insertion_at").alias("insertion_at"),
+    year("novo.data_atualizacao").alias("ano"),
+    month("novo.data_atualizacao").alias("mes")
+)
+
+# Restante da Gold
+df_gold_restante = df_gold.join(df_atualizaveis_sel.select("id_cliente"), "id_cliente", "left_anti")
+
+# Uniao final
+df_gold_atualizado = df_gold_restante.unionByName(df_atualizaveis_sel).unionByName(df_novos)
+
+df_gold_atualizado.write.mode("overwrite").format("delta").save(goldPath)
+
+spark.sql("DROP TABLE IF EXISTS gold.clientes")
+spark.sql(f"""
+CREATE TABLE gold.clientes
+USING DELTA
+LOCATION '{goldPath}'
+""")

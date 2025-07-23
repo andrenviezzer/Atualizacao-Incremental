@@ -1,0 +1,37 @@
+## Notebook: Bronze - Ingestão com Auto Loader
+
+
+from pyspark.sql.types import StructType, StructField, IntegerType, StringType, TimestampType
+from pyspark.sql.functions import to_date, current_timestamp, hash, concat_ws
+
+inputPath = "dbfs:/FileStore/tables/bronze/"
+bronzePath = "dbfs:/FileStore/bronze/clientes"
+checkpointPath = "dbfs:/FileStore/checkpoints/bronze_clientes"
+
+schema = StructType([
+    StructField("id_cliente", IntegerType(), True),
+    StructField("nome", StringType(), True),
+    StructField("email", StringType(), True),
+    StructField("data_atualizacao", TimestampType(), True)
+])
+
+df = (spark.readStream
+    .format("cloudFiles")
+    .option("cloudFiles.format", "csv")
+    .option("header", "true")
+    .option("delimiter", ";")
+    .option("multiLine", "true")
+    .option("encoding", "UTF-8")
+    .schema(schema)
+    .load(inputPath))
+
+df = df.withColumn("data_atualizacao", to_date("data_atualizacao"))
+
+df = df.withColumn("pk_hash", hash(concat_ws(";", "id_cliente")))
+df = df.withColumn("insertion_at", current_timestamp())
+
+(df.writeStream
+    .format("delta")
+    .option("checkpointLocation", checkpointPath)
+    .outputMode("append")
+    .start(bronzePath))
